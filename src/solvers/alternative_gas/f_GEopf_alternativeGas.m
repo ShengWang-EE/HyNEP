@@ -44,7 +44,7 @@ if GEinformation.problem ~= 0
     error('optimization problem has issues');
 end
 % parameters for original natural gas
-gasComposition_ng = mean(mpc.gasCompositionForGasSource);
+gasComposition_ng = get_reference_gas_composition(mpc.gasCompositionForGasSource);
 M_ng = gasComposition_ng * M.all';
 GCV_ng = gasComposition_ng * GCV.all';
 S_ng = M_ng/M.air;

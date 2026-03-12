@@ -1,0 +1,34 @@
+cff-version: 1.2.0
+message: "If you use this repository, please cite the associated article below."
+title: "HyNEP"
+type: software
+license: "MIT"
+version: "0.1.0"
+url: "https://ieeexplore.ieee.org/abstract/document/10458410"
+abstract: "MATLAB code for nodal energy price modeling in hydrogen-blended integrated electricity and gas systems."
+keywords:
+  - integrated electricity and gas systems
+  - hydrogen blending
+  - nodal energy price
+  - MATLAB
+  - YALMIP
+preferred-citation:
+  type: article
+  title: "Carbon-Embedded Nodal Energy Price in Hydrogen-Blended Integrated Electricity and Gas Systems with Heterogeneous Gas Compositions"
+  journal: "IEEE Transactions on Sustainable Energy"
+  year: 2024
+  volume: 15
+  issue: 3
+  start: 1729
+  end: 1742
+  doi: "10.1109/TSTE.2024.3372628"
+  url: "https://ieeexplore.ieee.org/abstract/document/10458410"
+  authors:
+    - family-names: "Wang"
+      given-names: "Sheng"
+    - family-names: "Hui"
+      given-names: "Hongxun"
+    - family-names: "Zhai"
+      given-names: "Junyi"
+    - family-names: "Siano"
+      given-names: "Pierluigi"

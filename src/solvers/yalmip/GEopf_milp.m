@@ -57,6 +57,16 @@ Pgmin = mpc.gen(:, PMIN) / baseMVA *0; %Pgmin is set to zero
 Pgmax = mpc.gen(:, PMAX) / baseMVA;
 LCemin = 0; LCemax = electricityLoadCurtailmentProportion * mpc.bus(id,PD)/baseMVA;
 
+fixedGasPressureCons = [];
+if isfield(mpc, 'fixedGasPressureBuses') && ~isempty(mpc.fixedGasPressureBuses)
+    fixedGasPressureBuses = mpc.fixedGasPressureBuses;
+    if size(fixedGasPressureBuses, 2) ~= 2
+        error('mpc.fixedGasPressureBuses must be an N-by-2 matrix: [gas_bus_id, pressure_bar].');
+    end
+    fixedGasPressureRows = get_gas_bus_rows(mpc, fixedGasPressureBuses(:,1), 'mpc.fixedGasPressureBuses');
+    fixedGasPressureCons = [Prs_square(fixedGasPressureRows) == fixedGasPressureBuses(:,2).^2];
+end
+
 % Qptg = 0.5*Qptgmax;
 %% contraints
 Pptg = Qptg/24/3600 * GCV.ng_ref * eta.electrolysis / baseMVA;
@@ -92,7 +102,7 @@ cons = [
     gasNodalBalanceCons;
     gasPipelineFlowCons;
     gasFlowCons;
-    Prs_square(20) == 25^2;
+    fixedGasPressureCons;
     ];
 objfcn = objfcn_IEGSoperatingCost(Pg,LCe,PGs,Qptg,LCg,mpc,CDF.electricity,CDF.gas,id,iGd);
 yalmipOptions = sdpsettings('verbose',2,'solver','gurobi','usex0',0,'debug',1);

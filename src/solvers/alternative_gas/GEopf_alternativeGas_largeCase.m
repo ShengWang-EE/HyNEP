@@ -1,4 +1,4 @@
-function [information, solution] = GEopf_alternativeGas_optimizer(mpc)
+function [information, solution] = GEopf_alternativeGas_largeCase(mpc,options)
 %
 [PQ, PV, REF, NONE, BUS_I, BUS_TYPE, PD, QD, GS, BS, BUS_AREA, VM, ...
     VA, BASE_KV, ZONE, VMAX, VMIN, LAM_P, LAM_Q, MU_VMAX, MU_VMIN] = idx_bus;
@@ -27,26 +27,38 @@ iGd = find(mpc.Gbus(:,3)~=0);
 
 % CH4, C2H6, C3H8, C4H10, H2, N2, CO2
 nGasType = 7; iCombustibleGas = 1:5; iNonCombustibleGas = 6:7;
-[GCV, M, fs, a, R, T_stp, Prs_stp, Z_ref, T_gas, eta, CDF] = initializeParameters_J15();
+[GCV, M, fs, a, R, T_stp, Prs_stp, Z_ref, T_gas, eta, CDF,rho_stp] = initializeParameters_J15();
 %%
-xi = 0.1; % threshold for the security index
-alpha_PHI = 1e-4;alpha_x = 1e-4; alpha_Qd = 1e-4;
+if  isempty(options)
+    FSlimit = 0.2;
+    WImin = 46.5; WImax = 52.85;
+else
+    FSlimit = options.FSlimit;
+    if options.WIlimit == 1
+        WImin = 47.2; WImax = 51.41; % old
+    elseif options.WIlimit == 2
+        WImin = 46.5; WImax = 52.85;
+    elseif options.WIlimit == 3
+        WImin = 45.8; WImax = 54.29;
+    end
+end
+alpha_PHI = 1e-1;alpha_x = 1e-1; alpha_Qd = 1e-1;
 lambda = 1; % coefficient for gas flow
-multiplier = 1.5; alpha_PHI_max = 1e2; alpha_x_max = 1e4; alpha_Qd_max = 1e4;
+multiplier = 1.5; alpha_PHI_max = 1e4; alpha_x_max = 1e4; alpha_Qd_max = 1e4;
 iterationMax = 60;
 gap = 1e-3; % optimization convergence criterion
 
 ob.Pg = [];
 
 % step2: 初始状态认为是天然气的混合物
-[GEinformation, GEsolution] = GEopf_milp(mpc);
+[GEinformation, GEsolution] = GEopf_milp_largeCase(mpc);
 if GEinformation.problem ~= 0
     error('optimization problem has issues');
 end
 %% initial value
 PGs_ref = GEsolution.PGs;
 % parameters for original natural gas
-gasComposition_ng = mean(mpc.gasCompositionForGasSource);
+gasComposition_ng = get_reference_gas_composition(mpc.gasCompositionForGasSource);
 M_ng = gasComposition_ng * M.all';
 GCV_ng = gasComposition_ng * GCV.all';
 S_ng = M_ng/M.air;
@@ -69,13 +81,24 @@ signGf = GEsolution.gamma;
 W_ref = nodalGasInjection(PGs_ref,QptgInbus_ref,signGf, gasFlow_sum_ref,mpc,nGs,nGb,nGl);
 gasLoad_ng = mpc.Gbus(iGd,3);
 
-solverTime = zeros(iterationMax,1);
+referenceValues = {
+    'gasComposition_ref', gasComposition_ref
+    'Qd_ref', Qd_ref
+    'Qgpp_ref', Qgpp_ref
+    'gasFlow_sum_ref', gasFlow_sum_ref
+    'W_ref', W_ref
+    'newC', mpc.Gline(:,3) .* sqrt(R_ng) ./ sqrt(R_pipeline_ref)
+};
 
-%% optimizer
-
+for iReference = 1:size(referenceValues, 1)
+    if any(~isfinite(referenceValues{iReference, 2}(:)))
+        error('Invalid non-finite reference value: %s', referenceValues{iReference, 1});
+    end
+end
 %%
+solverTime = zeros(iterationMax,1);
 for v = 1:iterationMax
-
+    yalmip('clear')
 %% state variables
 Prs_square = sdpvar(nGb,1); % bar^2
 PGs = sdpvar(nGs,1); % Mm3/day
@@ -87,11 +110,11 @@ Qgpp = sdpvar(nGpp, nGasType); % Mm3/day
 Va = sdpvar(nb,1);
 gasComposition = sdpvar(nGb,nGasType); 
 gasFlow = sdpvar(nGl,nGasType);% Mm3/day
-PHI = sdpvar(nGl,1); %auxiliary variable for gas flow
 sigma_PHI = sdpvar(nGl,1); % error limit for gas flow
 sigma_x = sdpvar(nGb, nGasType); % error for gas composition
 sigma_Qd = sdpvar(nGasLoad, nGasType);
 sigma_Qgpp = sdpvar(nGpp,nGasType);
+sigma_Gf = sdpvar(nGl,nGasType);
 % ------------test------------------
 LCg = zeros(nGasLoad,1);
 % varepsilon_x = zeros(nGb, nGasType); % error for gas composition
@@ -103,7 +126,7 @@ Qptgmin = mpc.ptg(:,5); Qptgmax = mpc.ptg(:,6);
 QptgMax_hydrogen = Qptgmax;
 Pgmin = mpc.gen(:, PMIN) / baseMVA *0; %Pgmin is set to zero
 Pgmax = mpc.gen(:, PMAX) / baseMVA;
-Pgmax(34:end,:) = 1e-4; % no electricity load curtailment
+
 LCgmin = zeros(nGasLoad,1);
 LCgmax = mpc.Gbus(mpc.Gbus(:,3)~=0,3).*0;  
 refs = find(mpc.bus(:, BUS_TYPE) == REF);
@@ -113,8 +136,8 @@ Vau(refs) = 1;   %% voltage angle reference constraints
 Val(refs) = 1;
 gasFlowMax = mpc.Gline(:,5);
 %% pre-calculation
-% calculate the gas flow of each pipeline
-newC = mpc.Gline(:,3) .* sqrt(R_ng) ./ sqrt(R_pipeline_ref);
+    % calculate the gas flow of each pipeline
+    newC = mpc.Gline(:,3) .* sqrt(R_ng) ./ sqrt(R_pipeline_ref);
 % newC = mpc.Gline(:,3);
 %% constraints
 % gas source cons
@@ -123,11 +146,11 @@ gasSourceCons = [  PGsmin <= PGs <= PGsmax;];
 energyDemand = mpc.Gbus(iGd,3) * GCV_ng; % energy need of these gas bus
 gasDemandCons = [
      -sigma_Qd <= gasComposition_ref(iGd,:) .* repmat(sum(Qd_ref,2),[1,nGasType]) + (gasComposition(iGd,:)-gasComposition_ref(iGd,:)) .* repmat(sum(Qd_ref,2),[1,nGasType]) ...
-        + gasComposition_ref(iGd,:) .* (repmat(sum(Qd,2),[1,nGasType])-repmat(sum(Qd_ref,2),[1,nGasType])) - Qd <= sigma_Qd;
-    Qd * GCV.all'/1e9 == energyDemand/1e9;    
+        + gasComposition_ref(iGd,:) .* (repmat(sum(Qd,2),[1,nGasType])-repmat(sum(Qd_ref,2),[1,nGasType])) - Qd <= sigma_Qd; 
     Qd >= 0;
     sigma_Qd >= 0;
     ]:'gasDemandCons';
+gasDemandBalanceCons = [    Qd * GCV.all'/1e9 == energyDemand/1e9;   ]:'gasDemandBalanceCons';
 % nodal gas flow balance cons
 nodalGasFlowBalanceCons = [
     consfcn_nodalGasFlowBalance(PGs,Qd,Qgpp,Qptg, gasFlow,mpc,nGasType,nGpp,nGasLoad,iGd) == 0;
@@ -145,30 +168,29 @@ GPPcons = [
     -sigma_Qgpp <= gasComposition_ref(iGppGd,:) .* repmat(sum(Qgpp_ref,2),[1,nGasType]) + (gasComposition(iGppGd,:)-gasComposition_ref(iGppGd,:)) .* repmat(sum(Qgpp_ref,2),[1,nGasType]) ...
         + gasComposition_ref(iGppGd,:) .* (repmat(sum(Qgpp,2),[1,nGasType])-repmat(sum(Qgpp_ref,2),[1,nGasType])) - Qgpp <= sigma_Qgpp;
     sigma_Qgpp >= 0;
-    Pgpp == Qgpp/24/3600 * GCV.all';
+    Pgpp == Qgpp/24/3600 * GCV.all'*eta.GFU;
     Qgpp >= 0;
     ]:'GPPcons';
 % electricity flow
 electricityCons = [
-    consfcn_electricPowerBalance(Va,Pg,Pptg,mpc) == 0;
     consfcn_electricBranchFlow(Va, mpc, il) <= 0;
     Pgmin <= Pg <= Pgmax;
     Va(refs) == 0; % 除了slackbus外，其他相角都没约束。但是一些solver在处理inf的上下限的时候有问题
     ]:'electricityCons';
+electricityBalanceCons = [consfcn_electricPowerBalance(Va,Pg,Pptg,mpc) == 0;]:'electricityBalanceCons';
 % wobbe index
 GCV_nodal = gasComposition * GCV.all';
 S_nodal = gasComposition * M.all' / M.air;
 sqrtS = 0.5 * (S_nodal/sqrt(S_ng) + sqrt(S_ng));
 WI_nodal = GCV_nodal ./ sqrtS; % 如果不能自动转化，那就手动化一下
-% WImin = 47.2; WImax = 51.41; %old
-WImin = 46.5; WImax = 52.85;
+
 WobbeIndexCons = [
     WImin * sqrtS <= GCV_nodal/1e6 <= WImax * sqrtS
     ]:'WobbeIndexCons';
 % Weaver flame speed factor
 FSnodal = gasComposition * fs.All';
 FScons = [
-    (1-xi) * FS_ng <= FSnodal <= (1+xi) * FS_ng;
+    (1-FSlimit) * FS_ng <= FSnodal <= (1+FSlimit) * FS_ng;
     ]:'FScons';
 % specific gravity
 SGcons = [
@@ -181,17 +203,20 @@ otherSecurityCons = [
 % SOC reformulation for gas flow
 FB = mpc.Gline(:,1); TB = mpc.Gline(:,2);
 gasFlow_sum = sum(gasFlow,2);
-PHI = (1+gamma)/2 .* (Prs_square(FB)-Prs_square(TB)) + (1-gamma)/2 .* (Prs_square(TB)-Prs_square(FB));
+% PrsSquareLeft = (1-gamma)/2 .* Prs(FB).^2 + (1+gamma)/2 .* Prs(TB).^2; 
+% PrsSquareRight = (1+gamma)/2 .* Prs(FB).^2 + (1-gamma)/2 .* Prs(TB).^2; 
+% PHI = (1+gamma)/2 .* (Prs_square(FB)-Prs_square(TB)) + (1-gamma)/2 .* (Prs_square(TB)-Prs_square(FB));
 gasFlowSOCcons = [
+    % Keep the large-case linearization consistent with the fixed reference flow direction.
     (gamma-1) .* gasFlowMax / 2 <= gasFlow_sum <= (gamma+1) .* gasFlowMax / 2;
     repmat((gamma-1) .* gasFlowMax / 2,[1,nGasType]) <= gasFlow <= repmat((gamma+1) .* gasFlowMax / 2, [1,nGasType]);
-    Prsmin.^2 <= Prs_square <= Prsmax.^2;
-    PHI >= gasFlow_sum.^2 ./ newC.^2 ;
-    PHI <= (gasFlow_sum_ref.^2 + 2*gasFlow_sum_ref .* (gasFlow_sum - gasFlow_sum_ref)) ./ newC.^2 + sigma_PHI;
+%     Prsmin.^2 <= Prs_square <= Prsmax.^2;
+%     cone([PHI'+1; (2./newC .* gasFlow_sum)'; PHI'-1]);
+%     PHI <= (gasFlow_sum_ref.^2 + 2*gasFlow_sum_ref .* (gasFlow_sum - gasFlow_sum_ref)) ./ newC.^2 + sigma_PHI;
     sigma_PHI >= 0;
     ]:'gasFlowSOCcons';
 % gas composition Taylor
-PTGbus = mpc.ptg(:,1) ; 
+PTGbus = mpc.ptg(:,1); 
 CgsPTG = sparse(PTGbus, (1:nPTG)', 1, nGb, nPTG); % connection matrix
 QptgInbusMethane = CgsPTG * Qptg(:,1) ; QptgInbusHydrogen = CgsPTG * Qptg(:,2);
 QptgInbusForAllGasComposition = [QptgInbusMethane, zeros(nGb,3),QptgInbusHydrogen,zeros(nGb,2)];
@@ -202,30 +227,26 @@ for r = 1:nGasType
             gamma, gasFlow(:,r),mpc,nGs,nGb,nGl);
 end
 
-% for r = 1:nGasType
-%     gasCompositionCons1 = [
-%         gasCompositionCons1;
-% %         gasComposition(:,r) == ...
-% %             nodalGasInjection(PGs.*mpc.gasCompositionForGasSource(:,r),QptgInbusForAllGasComposition(:,r),...
-% %             gamma, gasFlow(:,r),mpc,nGs,nGb,nGl) ./ W_ref + varepsilon_x(:,r);
-% %         gasComposition(:,r) == nodalGasInjection(PGs.*mpc.gasCompositionForGasSource(:,r),QptgInbusForAllGasComposition(:,r),...
-% %             gamma, gasFlow(:,r),mpc,nGs,nGb,nGl) ./ nodalGasInjectionSum; % original cons
-%         ];
-% end
 gasCompositionCons = [
     -sigma_x <= repmat(W_ref,[1,nGasType]) .* gasComposition_ref + (repmat(sum(nodalGasInjectionForEachComp,2),[1,nGasType]) - repmat(W_ref,[1,nGasType])) .* gasComposition_ref ...
         + repmat(W_ref,[1,nGasType]) .* (gasComposition - gasComposition_ref) - nodalGasInjectionForEachComp <= sigma_x;
+    - sigma_Gf <= (repmat((1+gamma),[1,nGasType]).*gasComposition_ref(mpc.Gline(:,1),:) + repmat((1-gamma),[1,nGasType]).*gasComposition_ref(mpc.Gline(:,2),:))/2 .* repmat(gasFlow_sum_ref,[1,nGasType]) ...
+        + ( (repmat((1+gamma),[1,nGasType]).*gasComposition(mpc.Gline(:,1),:) + repmat((1-gamma),[1,nGasType]).*gasComposition(mpc.Gline(:,2),:))/2 - (repmat((1+gamma),[1,nGasType]).*gasComposition_ref(mpc.Gline(:,1),:) + repmat((1-gamma),[1,nGasType]).*gasComposition_ref(mpc.Gline(:,2),:))/2 ) .* repmat(gasFlow_sum_ref,[1,nGasType]) ...
+        + (repmat((1+gamma),[1,nGasType]).*gasComposition_ref(mpc.Gline(:,1),:) + repmat((1-gamma),[1,nGasType]).*gasComposition_ref(mpc.Gline(:,2),:))/2 .* ( repmat(gasFlow_sum,[1,nGasType]) - repmat(gasFlow_sum_ref,[1,nGasType]) ) ...
+        - gasFlow <= sigma_Gf;
+        sigma_Gf >= 0;
     sigma_x >= 0;
     sum(gasComposition,2) == 1;
-    gasComposition(12,:) == gasComposition(17,:);
     ]:'gasCompositionCons';
 % summarize all the cons
 constraints = [
     gasDemandCons;
+    gasDemandBalanceCons;
     nodalGasFlowBalanceCons;
     PTGcons;
     GPPcons;
     electricityCons;
+    electricityBalanceCons;
     WobbeIndexCons;
     FScons;
     SGcons;
@@ -233,19 +254,27 @@ constraints = [
     gasFlowSOCcons;
     gasCompositionCons;
     gasSourceCons;
-    Prs_square(20) == 25^2;
     ];
 %% solve the problem
-objfcn = obj_operatingCost(Pg,PGs,LCg,Qptg,PHI, sigma_PHI, sigma_x, alpha_PHI,alpha_x, mpc,lambda,CDF) ...
-    + alpha_Qd * 100 * (sum(sum(sigma_Qd))+sum(sum(sigma_Qgpp)));
-options = sdpsettings('verbose',2,'solver','gurobi', 'debug',1,'usex0',0);
+objfcn = obj_operatingCost_largeCase(Pg,PGs,LCg,Qptg, mpc,CDF) ...
+    +  1*alpha_PHI * sum(sum(sigma_PHI)) + 10000* alpha_x * sum(sum(sigma_x)) ...
+    + alpha_Qd * 100 * (sum(sum(sigma_Qd)) + sum(sum(sigma_Qgpp)) + sum(sum(sigma_Gf)));
+% 要get dual，必须先设置好，而且把约束用cone函数写
+solverName = select_yalmip_solver({'mosek', 'gurobi'});
+options = sdpsettings('verbose',2,'debug',1,'usex0',0,'gurobi.qcpdual',1);
+if ~isempty(solverName)
+    options.solver = solverName;
+end
 % options.ipopt.tol = 1e-4;
 output{v} = optimize(constraints, objfcn, options);
+if output{v}.problem ~= 0
+    error('GEopf_alternativeGas_largeCase failed at iteration %d with solver "%s": %s', v, solverName, output{v}.info);
+end
 
 solverTime(v) = output{v}.solvertime;
 %% results
 Prs_square = value(Prs_square);
-Prs = sqrt(value(Prs_square));
+Prs = sqrt(Prs_square);
 PGs = value(PGs); % Mm3/day
 Qd = value(Qd); % Mm3/day
 Qptg = value(Qptg);
@@ -263,26 +292,33 @@ S_nodal = value(S_nodal);
 GCV_nodal = value(GCV_nodal)/1e6; % MJ/m3
 WInodal = value(WI_nodal)/1e6; % MJ/m3
 FSnodal = value(FSnodal);
-PHI = value(PHI);
+PHI = [];
 sigma_PHI = value(sigma_PHI);
 sigma_x = value(sigma_x);
 sigma_Qd = value(sigma_Qd);
 sigma_Qgpp = value(sigma_Qgpp);
+sigma_Gf = value(sigma_Gf);
 
-[objfcn,totalCost,genAndLCeCost,gasPurchasingCost,gasCurtailmentCost,PTGsubsidy,penalty_PHI,penalty_sigma_PHI, penalty_sigma_x] = ...
-    obj_operatingCost(Pg,PGs,LCg,Qptg,PHI, sigma_PHI, sigma_x, alpha_PHI,alpha_x, mpc,lambda, CDF);
-%
-[sol{v}.totalCost,sol{v}.genAndLCeCost,sol{v}.gasPurchasingCost,sol{v}.gasCurtailmentCost,sol{v}.PTGsubsidy,sol{v}.penalty_PHI,sol{v}.penalty_sinma_PHI, sol{v}.penalty_sigma_x, sol{v}.objfcn, ...
+
+[objfcn,totalCost,electricityGenerationCost,gasPurchasingCost,gasCurtailmentCost,PTGsubsidy] = ...
+    obj_operatingCost_largeCase(Pg/baseMVA,PGs,LCg,Qptg, mpc, CDF);
+% calculate carbon emission cost
+% 36$/tCO2 http://www.3e.tsinghua.edu.cn/cn/article/301
+carbonEmissionFactor = 1 * gasComposition * rho_stp * 1e6 ./ repmat(M.all, [nGb,1]) * [1,2,3,4,0,0,1]' * 44 * 1e-3;
+nodalCarbonEmissionPrice = carbonEmissionFactor / 1000 * 4/24;
+nodalCarbonEmissionPrice_ng = gasComposition_ng * rho_stp * 1e6 ./ repmat(M.all, [nGb,1]) * [1,2,3,4,0,0,1]' * 44 * 1e-3 / 1000 *4/24;
+
+[sol{v}.totalCost,sol{v}.genAndLCeCost,sol{v}.gasPurchasingCost,sol{v}.gasCurtailmentCost,sol{v}.PTGsubsidy,sol{v}.objfcn, ...
     sol{v}.Prs_square,sol{v}.Prs,sol{v}.PGs,sol{v}.Qd,sol{v}.Qptg,sol{v}.Pptg,sol{v}.Pg,sol{v}.Pgpp,sol{v}.Qgpp,...
     sol{v}.Va,sol{v}.LCg,sol{v}.gamma,sol{v}.gasComposition,sol{v}.gasFlow,sol{v}.gasFlow_sum,sol{v}.S_nodal,...
-    sol{v}.GCV_nodal,sol{v}.WI,sol{v}.PHI,sol{v}.sigma_PHI,sol{v}.sigma_x,sol{v}.sigma_Qd,sol{v}.sigma_Qgpp] = ...
-    deal(totalCost,genAndLCeCost,gasPurchasingCost,gasCurtailmentCost,PTGsubsidy,penalty_PHI,penalty_sigma_PHI, penalty_sigma_x, objfcn, ...
+    sol{v}.GCV_nodal,sol{v}.WI,sol{v}.PHI,sol{v}.sigma_PHI,sol{v}.sigma_x,sol{v}.sigma_Qd,sol{v}.sigma_Qgpp,sol{v}.FSnodal,sol{v}.nodalCarbonEmissionPrice] = ...
+    deal(totalCost,electricityGenerationCost,gasPurchasingCost,gasCurtailmentCost,PTGsubsidy, objfcn, ...
     Prs_square,Prs,PGs,Qd,Qptg,Pptg,Pg,Pgpp,Qgpp,Va,LCg,gamma,gasComposition,gasFlow,gasFlow_sum,S_nodal,...
-    GCV_nodal,WInodal,PHI,sigma_PHI,sigma_x,sigma_Qd,sigma_Qgpp);
+    GCV_nodal,WInodal,PHI,sigma_PHI,sigma_x,sigma_Qd,sigma_Qgpp,FSnodal,nodalCarbonEmissionPrice);
 
 %% covergence criterion
 if v > 1
-    criterion.sigma_PHI(v-1) = sum(sum(sigma_PHI))/1e3;
+    criterion.sigma_PHI(v-1) = sum(sum(sigma_PHI))/1e2;
     criterion.sigma_x(v-1) = sum(sum(sigma_x));
     criterion.sigma_Qd(v-1) = sum(sum(sigma_Qd));
     criterion.sigma_Qgpp(v-1) = sum(sum(sigma_Qgpp));
@@ -292,7 +328,7 @@ if v > 1
     criterion.delta_sigma_Qgpp(v-1) = abs( (sum(sum(sigma_Qgpp)) - sum(sum(sol{v-1}.sigma_Qgpp)))) / abs( (sum(sum(sigma_Qgpp)) + sum(sum(sol{v-1}.sigma_Qgpp))));
     %cost
     criterion.totalCost(v-1) = abs( (totalCost - sol{v-1}.totalCost)) / sol{v-1}.totalCost;
-    criterion.genAndLCeCost(v-1) = abs( (genAndLCeCost - sol{v-1}.genAndLCeCost)/sol{v-1}.genAndLCeCost );
+    criterion.genAndLCeCost(v-1) = abs( (electricityGenerationCost - sol{v-1}.genAndLCeCost)/sol{v-1}.genAndLCeCost );
     criterion.gasPurchasingCost(v-1) = abs( (gasPurchasingCost - sol{v-1}.gasPurchasingCost)/sol{v-1}.gasPurchasingCost );
     criterion.PTGsubsidy(v-1) = abs( (PTGsubsidy - sol{v-1}.PTGsubsidy)/sol{v-1}.PTGsubsidy );
     criterion.gasCompositionCH4(v-1) = abs(sum(gasComposition(:,1)) - sum(sol{v-1}.gasComposition(:,1)))*2 ./ (sum(gasComposition(:,1)) + sum(sol{v-1}.gasComposition(:,1)));
@@ -300,12 +336,23 @@ if v > 1
     criterion.S_nodal(v-1) = max(abs( (S_nodal-sol{v-1}.S_nodal)./sol{v-1}.S_nodal ));
     criterion.Qd(v-1) = abs( ( sum(sum(sigma_Qd)) - sum(sum(sol{v-1}.sigma_Qd)) ) / sum(sum(sol{v-1}.sigma_Qd)) );
 
-    if ( (criterion.sigma_PHI(v-1)<=gap) || (criterion.delta_sigma_PHI(v-1)<=gap) ) ...
-            && ( (criterion.sigma_x(v-1)<=gap) || (criterion.delta_sigma_x(v-1)<=gap) ) ...
-            && ( (criterion.sigma_Qd(v-1)<=gap) ||  (criterion.delta_sigma_Qd(v-1)<gap) ) ...
-            && ( (criterion.sigma_Qgpp(v-1)<=gap) || (criterion.delta_sigma_Qgpp(v-1)<gap) )
-        break
-    else
+    if  ( (criterion.sigma_PHI(v-1)<=1e-3) && (criterion.sigma_x(v-1)<=1e-2) ...
+            && (criterion.sigma_Qd(v-1)<=1e-2) && (criterion.sigma_Qgpp(v-1)<=1e-2) ) && ...
+                ( (criterion.sigma_x(v-1)<=gap) || (criterion.delta_sigma_x(v-1)<=gap) ) ...
+                && ( (criterion.sigma_Qd(v-1)<=gap) ||  (criterion.delta_sigma_Qd(v-1)<gap) ) ...
+                && ( (criterion.sigma_Qgpp(v-1)<=gap) || (criterion.delta_sigma_Qgpp(v-1)<gap) )
+        % calculate nodal energy price
+%             nodalGasPrice = dual(constraints('gasDemandBalanceCons'));
+%             objfcn = obj_operatingCost_largeCase(Pg,PGs,LCg,Qptg, mpc,CDF);
+%             output{v} = optimize(constraints, objfcn, options);
+            nodalGasPriceForEachComposition = - dual(constraints('nodalGasFlowBalanceCons'));
+            nodalGasPrice = sum(nodalGasPriceForEachComposition .* gasComposition,2); % $/Mm3
+            nodalElectricityPrice = dual(constraints('electricityBalanceCons'))/100;
+            sol{v}.nodalGasPriceForEachComposition = nodalGasPriceForEachComposition;
+            sol{v}.nodalGasPrice = nodalGasPrice;
+            sol{v}.nodalElectricityPrice = nodalElectricityPrice;
+            break
+        else
         alpha_PHI = min([multiplier * alpha_PHI,alpha_PHI_max]);
         alpha_x = min([multiplier * alpha_x,alpha_x_max]);
         alpha_Qd = min([multiplier * alpha_Qd,alpha_Qd_max]);
@@ -319,11 +366,10 @@ R_pipeline_ref = ( (1+gamma).*R_nodal(FB) + (1-gamma).*R_nodal(TB) ) / 2;
 QptgInbus = CgsPTG * sum(Qptg,2);
 W_ref = nodalGasInjection(PGs,QptgInbus,gamma,gasFlow_sum,mpc,nGs,nGb,nGl);
 gasComposition_ref = gasComposition;
-if output{v}.problem ~= 0
-%     error('optimization failed');
-%     break
+gasFlow_sum_ref = gasFlow_sum;
 end
-end
+
+
 information = output{v}; solution = sol{v};
 end
 

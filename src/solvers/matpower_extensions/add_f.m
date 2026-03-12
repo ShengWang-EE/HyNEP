@@ -2,7 +2,7 @@ function [f_add_cost] = add_f(x,vv,mpc)
 % calculate the additional cost
 %   including gas purchasing cost, LCgcost (LCe cost, gas fired unit cost 
 % are already included in the original cost function) 
-%% 提取变量
+%% 鎻愬彇鍙橀噺
 PGs = x(vv.i1.PGs:vv.iN.PGs);
 LCg = x(vv.i1.LCg:vv.iN.LCg);
 %%
@@ -16,6 +16,6 @@ gasCDF = calculateGasCDF(mpc);
 addCostPGs = PGs'*mpc.Gcost;
 addCostLCg = sum(gasCDF .* LCg);
 %% 
-f_add_cost = addCostPGs + addCostLCg;%记得还要修改导数部分
+f_add_cost = addCostPGs + addCostLCg;%璁板緱杩樿淇敼瀵兼暟閮ㄥ垎
 end
 

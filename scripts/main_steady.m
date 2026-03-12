@@ -1,9 +1,13 @@
-clear
-clc
-yalmip('clear')
-load("windData.mat")
-%% parameters
-[mpc,gtd] = case24GE_J15(); 
+%% Environment setup
+clear;
+clc;
+script_dir = fileparts(mfilename('fullpath'));
+run(fullfile(script_dir, "setup_paths.m"));
+yalmip('clear');
+load(fullfile(project_root, "data", "processed", "windData.mat"));
+
+%% Base case data
+[mpc, gtd] = case24GE_J15();
 
 [PQ, PV, REF, NONE, BUS_I, BUS_TYPE, PD, QD, GS, BS, BUS_AREA, VM, ...
     VA, BASE_KV, ZONE, VMAX, VMIN, LAM_P, LAM_Q, MU_VMAX, MU_VMIN] = idx_bus;
@@ -14,32 +18,44 @@ load("windData.mat")
     TAP, SHIFT, BR_STATUS, PF, QF, PT, QT, MU_SF, MU_ST, ...
     ANGMIN, ANGMAX, MU_ANGMIN, MU_ANGMAX] = idx_brch;
 [PW_LINEAR, POLYNOMIAL, MODEL, STARTUP, SHUTDOWN, NCOST, COST] = idx_cost;
+
+%% Network sizes and index helpers
 baseMVA = 100;
 il = find(mpc.branch(:, RATE_A) ~= 0 & mpc.branch(:, RATE_A) < 1e10);
 
-nb   = size(mpc.bus, 1);    %% number of buses
-ng = size(mpc.gen,1);
-nd = size(find(mpc.bus(:,PD)~=0),1);
-id = find(mpc.bus(:,PD)~=0);
-nGb  = size(mpc.Gbus,1); % number of gas bus
-nGl = size(mpc.Gline,1);
-nGen = sum(mpc.gen(:,22)==1)+sum(mpc.gen(:,22)==0);% all gen(TFU and GFU), excluded dispatchable loads
-nGPP = size(mpc.gfuIndex,1);
-nGs = size(mpc.Gsou,1);
-nGd = size(find(mpc.Gbus(:,3)~=0),1);
-nPTG = size(mpc.ptg,1);
-iGd = find(mpc.Gbus(:,3)~=0);
-nWindFarm = size(mpc.windfarmIndex,1);
+nb = size(mpc.bus, 1);    %% number of buses
+ng = size(mpc.gen, 1);
+nd = nnz(mpc.bus(:, PD) ~= 0);
+id = find(mpc.bus(:, PD) ~= 0);
+nGb = size(mpc.Gbus, 1); % number of gas bus
+nGl = size(mpc.Gline, 1);
+nGen = sum(mpc.gen(:, 22) == 1) + sum(mpc.gen(:, 22) == 0); % all gen(TFU and GFU), excluded dispatchable loads
+nGPP = size(mpc.gfuIndex, 1);
+nGs = size(mpc.Gsou, 1);
+nGd = nnz(mpc.Gbus(:, 3) ~= 0);
+nPTG = size(mpc.ptg, 1);
+iGd = find(mpc.Gbus(:, 3) ~= 0);
+nWindFarm = size(mpc.windfarmIndex, 1);
 
+%% Base-case adjustments
 mpc0 = mpc;
-mpc.gen(:,PMIN) = 0; % 最小出力为0
-mpc.Gbus(:,3) = mpc.Gbus(:,3)*46.0980/48.9660; % 减少负荷数量，不然总气源能量不足
+mpc.gen(:, PMIN) = 0; % 最小出力为0
+mpc.Gbus(:, 3) = mpc.Gbus(:, 3) * 46.0980 / 48.9660; % 减少负荷数量，不然总气源能量不足
 % mpc.branch([28,31,32,33],6) = mpc.branch([28,31,32,33],6)/2; % 围绕着RNG的线路容量/2
-mpc.Gbus(:,6) = 99;%气压上限全部增加
-mpc.Gbus(:,5) = 25;%气压下限全部变一致
-mpc.Gsou(:,3) = 0;
+mpc.Gbus(:, 6) = 99; %气压上限全部增加
+mpc.Gbus(:, 5) = 25; %气压下限全部变一致
+mpc.Gsou(:, 3) = 0;
 
-    % ------test ------
+%% Case-specific gas constraints used by the solver
+mpc.gasCompositionEqualityBuses = [
+    12 17
+];
+mpc.fixedGasPressureBuses = [
+    20 25
+];
+
+%% Small-case experiments
+% ------test ------
 %     mpc.gen(9:11,PMAX) = 80;
 %     mpc.gencost(9:11,5:7) = 20 * mpc.gencost(9:11,5:7);
 %     mpc.GEcon=[
@@ -48,7 +64,7 @@ mpc.Gsou(:,3) = 0;
 %     16 2
 %     1 7
 % ];
-    %------------
+% ------------
 % GEopf_alternativeGas_nonlinear(mpc);
 % [information_milp, GEresult_milp] = GEopf_milp(mpc);
 % ------case1-------------
@@ -58,12 +74,13 @@ mpc.Gsou(:,3) = 0;
 % toc
 %--------------------------
 
-
-
+%% Shared parameters for time-series studies
 NK = 48;
 
 % CH4, C2H6, C3H8, C4H10, H2, N2, CO2
-nGasType = 7; iCombustibleGas = 1:5; iNonCombustibleGas = 6:7;
+nGasType = 7;
+iCombustibleGas = 1:5;
+iNonCombustibleGas = 6:7;
 [GCV, M, fs, a, R, T_stp, Prs_stp, Z_ref, T_gas, eta, CDF] = initializeParameters_J15();
 
 %% wind data and steady-state results
@@ -243,11 +260,11 @@ nGasType = 7; iCombustibleGas = 1:5; iNonCombustibleGas = 6:7;
 % impactAnalysis = [impactLowFSupWI, impactLowFSdownWI, impactMidFSupWI, impactMidFSdownWI, impactHighFSupWI, impactHighFSdownWI, ...
 %     impactLowWIupFS, impactLowWIdownFS, impactMidWIupFS, impactMidWIdownFS, impactHighWIupFS, impactHighWIdownFS];
 
-%% large case
-[mpc] = NorthWestCase();
+%% Large case
+mpc = NorthWestCase();
 % does not consider gas pressure drop
-mpc.Gsou(:,3) = 0;
-mpc.ptg(:,6) = 3;
+mpc.Gsou(:, 3) = 0;
+mpc.ptg(:, 6) = 3;
 % 把ptg往风机在的节点上调
 % mpc.ptg(:,2) = [
 %     111
@@ -262,6 +279,7 @@ mpc.ptg(:,6) = 3;
 % mpc.branch(:,6) = mpc.branch(:,6)/1.5;
 % [information_milp, GEresult_milp] = GEopf_milp_largeCase(mpc);
 
-[information, solution] = GEopf_alternativeGas_largeCase(mpc,[]);
+[information, solution] = GEopf_alternativeGas_largeCase(mpc, []);
 
-save 
+%% Save workspace snapshot
+save;
